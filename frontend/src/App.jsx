@@ -69,23 +69,72 @@ export default function App() {
     fetchData();
   }, []);
 
-  const employeeStats = (empId) => {
+ const employeeStats = (empId) => {
+    const emp = employees.find(e => e.id === empId);
+    if (!emp) {
+      return {
+        paid: 0,
+        outstandingAdvance: 0,
+        credit: 0,
+        totalCredit: 0,
+        expectedSalary: 0,
+        excessAsCredit: 0,
+        txCount: 0
+      };
+    }
+
     const txs = transactions.filter(t => t.employeeId === empId);
-    const paid = txs.filter(t => t.type === 'payment').reduce((s, t) => s + Number(t.amount), 0);
-    const advGiven = txs.filter(t => t.type === 'advance').reduce((s, t) => s + Number(t.amount), 0);
-    const advRepaid = txs.filter(t => t.type === 'deduction').reduce((s, t) => s + Number(t.amount), 0);
-    const credit = txs.filter(t => t.type === 'credit').reduce((s, t) => s + Number(t.amount), 0);
-    const outstandingAdvance = advGiven - advRepaid;
-    return { paid, outstandingAdvance, credit, txCount: txs.length };
+    const paid = txs.filter(t => t.type === 'payment').reduce((s, t) => s + Number(t.amount || 0), 0);
+    const advGiven = txs.filter(t => t.type === 'advance').reduce((s, t) => s + Number(t.amount || 0), 0);
+    const advRepaid = txs.filter(t => t.type === 'deduction').reduce((s, t) => s + Number(t.amount || 0), 0);
+    const explicitCredit = txs.filter(t => t.type === 'credit').reduce((s, t) => s + Number(t.amount || 0), 0);
+
+    const baseSalary = Number(emp.baseSalary || 0);
+    const joiningMonth = Number(emp.joiningMonth) || 1;
+    const joiningYear = Number(emp.joiningYear) || CURRENT_YEAR;
+
+    // Filter payments from joining period onwards
+    const salaryPayments = txs.filter(t => {
+      if (t.type !== 'payment' || !t.salaryMonth || !t.salaryYear) return false;
+      return (
+        t.salaryYear > joiningYear ||
+        (t.salaryYear === joiningYear && t.salaryMonth >= joiningMonth)
+      );
+    });
+
+    // Salary base expected for the logged payment periods
+    const expectedBaseTotal = salaryPayments.length * baseSalary;
+
+    // Net Ledger Balance Calculation
+    // Total Credits/Earnings due vs Total Debits/Payouts made
+    const totalEarnedDue = expectedBaseTotal + advRepaid + explicitCredit;
+    const totalPaidOut = paid + advGiven;
+    const netBalance = totalEarnedDue - totalPaidOut;
+
+    // Mutually exclusive: either Advance Owed OR Pending Credit, never both
+    const outstandingAdvance = netBalance < 0 ? Math.abs(netBalance) : 0;
+    const pendingCredit = netBalance > 0 ? netBalance : 0;
+
+    // Expected salary calculation for the upcoming payout cycle
+    const currentCycleBase = baseSalary;
+    const availableToPay = currentCycleBase + pendingCredit;
+    const overrun = outstandingAdvance - availableToPay;
+    const expectedSalary = overrun > 0 ? 0 : availableToPay - outstandingAdvance;
+    const excessAsCredit = overrun > 0 ? overrun : 0;
+
+    return {
+      paid,
+      outstandingAdvance,
+      credit: explicitCredit,
+      totalCredit: pendingCredit,
+      expectedSalary,
+      excessAsCredit,
+      txCount: txs.length
+    };
   };
 
   const expectedSalaryInfo = (e) => {
-    const s = employeeStats(e.id);
-    const availableToPay = Number(e.baseSalary || 0) + s.credit;
-    const overrun = s.outstandingAdvance - availableToPay;
-    const expectedSalary = overrun > 0 ? 0 : availableToPay - s.outstandingAdvance;
-    const excessAsCredit = overrun > 0 ? overrun : 0;
-    return { ...s, expectedSalary, excessAsCredit };
+    return employeeStats(e.id);
   };
 
   const globalStats = useMemo(() => {
@@ -450,6 +499,9 @@ function EmployeeDetailPage({ employee, salaryInfo, transactions, onBack, onEdit
             <h1 className="page-title" style={{ fontSize: '23px' }}>{employee.name}</h1>
             <div className="page-desc" style={{ marginTop: '2px' }}>
               {employee.role || 'No role set'} · {employee.phone || 'No phone on file'} · Prefers {employee.defaultMode}
+              {employee.joiningMonth && employee.joiningYear && (
+                <> · Joined {MONTH_NAMES[employee.joiningMonth - 1]} {employee.joiningYear}</>
+              )}
             </div>
           </div>
         </div>
@@ -462,7 +514,7 @@ function EmployeeDetailPage({ employee, salaryInfo, transactions, onBack, onEdit
       <div className="stat-grid">
         <div className="stat-card"><div className="stat-label">Total paid</div><div className="stat-value mono">{fmt(salaryInfo.paid)}</div></div>
         <div className="stat-card rust"><div className="stat-label">Advance outstanding</div><div className="stat-value mono">{fmt(salaryInfo.outstandingAdvance)}</div></div>
-        <div className="stat-card"><div className="stat-label">Credits / bonus</div><div className="stat-value mono">{fmt(salaryInfo.credit)}</div></div>
+        <div className="stat-card"><div className="stat-label">Credits / bonus</div><div className="stat-value mono">{fmt(salaryInfo.totalCredit)}</div></div>
         <div className="stat-card"><div className="stat-label">Expected salary due</div><div className="stat-value mono">{fmt(salaryInfo.expectedSalary)}</div></div>
       </div>
 
@@ -602,6 +654,8 @@ function EmployeeModal({ initialData, onSave, onDelete, onClose }) {
     phone: initialData?.phone || '',
     baseSalary: initialData?.baseSalary || '',
     defaultMode: initialData?.defaultMode || PAYMENT_MODES[0],
+    joiningMonth: initialData?.joiningMonth || CURRENT_MONTH,
+    joiningYear: initialData?.joiningYear || CURRENT_YEAR,
   });
 
   const handleSubmit = (e) => {
@@ -612,7 +666,9 @@ function EmployeeModal({ initialData, onSave, onDelete, onClose }) {
       name: form.name.trim(),
       role: form.role.trim(),
       phone: form.phone.trim(),
-      baseSalary: Number(form.baseSalary) || 0
+      baseSalary: Number(form.baseSalary) || 0,
+      joiningMonth: Number(form.joiningMonth),
+      joiningYear: Number(form.joiningYear)
     });
   };
 
@@ -636,6 +692,20 @@ function EmployeeModal({ initialData, onSave, onDelete, onClose }) {
             <div className="field">
               <label>Phone</label>
               <input type="text" value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} placeholder="Optional" />
+            </div>
+          </div>
+          <div className="field-row">
+            <div className="field">
+              <label>Joining month</label>
+              <select value={form.joiningMonth} onChange={e => setForm({ ...form, joiningMonth: Number(e.target.value) })}>
+                {MONTH_NAMES.map((name, i) => <option key={name} value={i + 1}>{name}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label>Joining year</label>
+              <select value={form.joiningYear} onChange={e => setForm({ ...form, joiningYear: Number(e.target.value) })}>
+                {Array.from({ length: 10 }, (_, i) => CURRENT_YEAR - i).map(y => <option key={y} value={y}>{y}</option>)}
+              </select>
             </div>
           </div>
           <div className="field-row">
@@ -664,17 +734,28 @@ function EmployeeModal({ initialData, onSave, onDelete, onClose }) {
 }
 
 function TransactionModal({ employees, transactions, presetEmployee, onSave, onClose, expectedSalaryInfo }) {
-  const [employeeId, setEmployeeId] = useState(presetEmployee || employees[0]?.id || '');
+  const selectedEmpId = presetEmployee || employees[0]?.id || '';
+  const selectedEmp = employees.find(e => e.id === selectedEmpId);
+  
+  const [employeeId, setEmployeeId] = useState(selectedEmpId);
   const [type, setType] = useState('payment');
   const [amount, setAmount] = useState('');
   const [date, setDate] = useState(TODAY_ISO);
-  const [mode, setMode] = useState(PAYMENT_MODES[0]);
+  const [mode, setMode] = useState(selectedEmp?.defaultMode || PAYMENT_MODES[0] || '');
   const [note, setNote] = useState('');
   const [salaryMonth, setSalaryMonth] = useState(CURRENT_MONTH);
   const [salaryYear, setSalaryYear] = useState(CURRENT_YEAR);
 
-  const selectedEmp = employees.find(e => e.id === employeeId);
-  const s = selectedEmp ? expectedSalaryInfo(selectedEmp) : null;
+  // Update mode when selected employee changes
+  useEffect(() => {
+    const emp = employees.find(e => e.id === employeeId);
+    if (emp) {
+      setMode(emp.defaultMode || PAYMENT_MODES[0]);
+    }
+  }, [employeeId, employees]);
+
+  const currentSelectedEmp = employees.find(e => e.id === employeeId);
+  const s = currentSelectedEmp ? expectedSalaryInfo(currentSelectedEmp) : null;
 
   const duplicateTx = useMemo(() => {
     if (type !== 'payment') return null;
@@ -685,6 +766,41 @@ function TransactionModal({ employees, transactions, presetEmployee, onSave, onC
       Number(t.salaryMonth) === Number(salaryMonth)
     );
   }, [transactions, employeeId, type, salaryYear, salaryMonth]);
+
+  const salaryStatusMessage = useMemo(() => {
+    if (type !== 'payment' || !currentSelectedEmp) return null;
+    if (duplicateTx) {
+      return {
+        className: 'blocked',
+        message: `Salary for ${MONTH_NAMES[salaryMonth - 1]} ${salaryYear} was already recorded on ${fmtDate(duplicateTx.date)} (${fmt(duplicateTx.amount)}). Duplicate entries aren't allowed — delete that entry first if you need to correct it.`
+      };
+    }
+    const base = Number(currentSelectedEmp.baseSalary || 0);
+    const amt = Number(amount) || 0;
+    if (!amt) {
+      return {
+        className: 'neutral',
+        message: `Base salary for ${MONTH_NAMES[salaryMonth - 1]} ${salaryYear} is ${fmt(base)}.`
+      };
+    }
+    const diff = amt - base;
+    if (diff === 0) {
+      return {
+        className: 'ok',
+        message: `Matches the base salary for ${MONTH_NAMES[salaryMonth - 1]} ${salaryYear} exactly.`
+      };
+    }
+    if (diff > 0) {
+      return {
+        className: 'over',
+        message: `${fmt(diff)} more than base salary — this will be recorded as overpaid for ${MONTH_NAMES[salaryMonth - 1]} ${salaryYear}.`
+      };
+    }
+    return {
+      className: 'pending',
+      message: `${fmt(-diff)} will remain pending for ${MONTH_NAMES[salaryMonth - 1]} ${salaryYear} after this payment.`
+    };
+  }, [type, currentSelectedEmp, salaryMonth, salaryYear, amount, duplicateTx]);
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -705,6 +821,8 @@ function TransactionModal({ employees, transactions, presetEmployee, onSave, onC
   };
 
   const years = Array.from({ length: 6 }, (_, i) => CURRENT_YEAR - i);
+  const joiningMonth = Number(currentSelectedEmp?.joiningMonth || CURRENT_MONTH);
+  const joiningYear = Number(currentSelectedEmp?.joiningYear || CURRENT_YEAR);
 
   return (
     <div className="modal-backdrop" onClick={e => e.target === e.currentTarget && onClose()}>
@@ -723,11 +841,11 @@ function TransactionModal({ employees, transactions, presetEmployee, onSave, onC
                 </select>
               </div>
 
-              {selectedEmp && s && (
+              {currentSelectedEmp && s && (
                 <div style={{ background: 'var(--paper)', border: '1px solid var(--paper-line)', borderRadius: '7px', padding: '14px 15px', marginBottom: '16px' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '10px' }}>
-                    <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--ledger-green-dark)' }}>{selectedEmp.role || 'No role set'}</div>
-                    <div style={{ fontSize: '11px', color: 'var(--ink-soft)' }}>Base {fmt(selectedEmp.baseSalary)}</div>
+                    <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--ledger-green-dark)' }}>{currentSelectedEmp.role || 'No role set'}</div>
+                    <div style={{ fontSize: '11px', color: 'var(--ink-soft)' }}>Base {fmt(currentSelectedEmp.baseSalary)}</div>
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '11.5px' }}>
                     <div>
@@ -736,7 +854,7 @@ function TransactionModal({ employees, transactions, presetEmployee, onSave, onC
                     </div>
                     <div>
                       <div style={{ color: 'var(--ink-soft)', textTransform: 'uppercase', letterSpacing: '0.04em', fontSize: '10px' }}>Pending credit</div>
-                      <div className="mono balance-pos" style={{ fontWeight: 600, marginTop: '2px' }}>{fmt(s.credit)}</div>
+                      <div className="mono balance-pos" style={{ fontWeight: 600, marginTop: '2px' }}>{fmt(s.totalCredit)}</div>
                     </div>
                   </div>
                   <div style={{ borderTop: '1px dashed var(--paper-line)', marginTop: '10px', paddingTop: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -765,11 +883,15 @@ function TransactionModal({ employees, transactions, presetEmployee, onSave, onC
                     <div className="field">
                       <label>Salary month</label>
                       <select value={salaryMonth} onChange={e => setSalaryMonth(Number(e.target.value))}>
-                        {MONTH_NAMES.map((name, i) => (
-                          <option key={name} value={i + 1} disabled={salaryYear === CURRENT_YEAR && (i + 1) > CURRENT_MONTH}>
-                            {name}
-                          </option>
-                        ))}
+                        {MONTH_NAMES.map((name, i) => {
+                          const monthNum = i + 1;
+                          const isBeforeJoining = salaryYear === joiningYear ? monthNum < joiningMonth : salaryYear < joiningYear;
+                          return (
+                            <option key={name} value={monthNum} disabled={isBeforeJoining}>
+                              {name}
+                            </option>
+                          );
+                        })}
                       </select>
                     </div>
                     <div className="field">
@@ -780,13 +902,9 @@ function TransactionModal({ employees, transactions, presetEmployee, onSave, onC
                     </div>
                   </div>
 
-                  {duplicateTx ? (
-                    <div className="salary-status blocked">
-                      Salary for {MONTH_NAMES[salaryMonth - 1]} {salaryYear} was already recorded on {fmtDate(duplicateTx.date)} ({fmt(duplicateTx.amount)}).
-                    </div>
-                  ) : (
-                    <div className="salary-status neutral">
-                      Base salary for {MONTH_NAMES[salaryMonth - 1]} {salaryYear} is {fmt(selectedEmp?.baseSalary || 0)}.
+                  {salaryStatusMessage && (
+                    <div className={`salary-status ${salaryStatusMessage.className}`}>
+                      {salaryStatusMessage.message}
                     </div>
                   )}
                 </div>
@@ -812,7 +930,7 @@ function TransactionModal({ employees, transactions, presetEmployee, onSave, onC
 
               <div className="modal-actions">
                 <button type="button" className="btn secondary" onClick={onClose}>Cancel</button>
-                <button type="submit" className="btn" disabled={!!duplicateTx}>Save entry</button>
+                <button type="submit" className="btn" disabled={type === 'payment' && !!duplicateTx}>Save entry</button>
               </div>
             </>
           ) : (
@@ -828,15 +946,32 @@ function TransactionModal({ employees, transactions, presetEmployee, onSave, onC
 }
 
 function ConfirmModal({ tx, emp, onConfirm, onCancel }) {
+  const trashIcon = (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14z"/>
+    </svg>
+  );
+
   return (
     <div className="modal-backdrop" onClick={e => e.target === e.currentTarget && onCancel()}>
       <div className="modal" style={{ width: '360px' }}>
         <div className="modal-body" style={{ paddingTop: '24px' }}>
-          <h3 style={{ fontSize: '16px' }}>Delete this entry?</h3>
-          <div style={{ fontSize: '13px', color: 'var(--ink-soft)', marginTop: '8px', lineHeight: 1.5 }}>
-            {tx ? (
-              <>Payment of <strong className="mono">{fmt(tx.amount)}</strong> for <strong>{emp?.name || 'Unknown'}</strong> on {fmtDate(tx.date)} will be permanently removed.</>
-            ) : 'This entry will be permanently removed from the ledger.'}
+          <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', marginBottom: '6px' }}>
+            <div style={{ width: '38px', height: '38px', borderRadius: '50%', background: 'var(--rust-soft)', color: 'var(--rust)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              {trashIcon}
+            </div>
+            <div>
+              <h3 style={{ fontSize: '16px' }}>Delete this entry?</h3>
+              <div style={{ fontSize: '13px', color: 'var(--ink-soft)', marginTop: '4px', lineHeight: 1.5 }}>
+                {tx ? (
+                  <>
+                    <span className={`stamp ${tx.type}`}>{TX_TYPES.find(x => x.id === tx.type)?.label || tx.type}</span> of <strong className="mono">{fmt(tx.amount)}</strong> for <strong>{emp?.name || 'Unknown'}</strong> on {fmtDate(tx.date)} will be permanently removed from the ledger.
+                  </>
+                ) : (
+                  <>This entry will be permanently removed from the ledger.</>
+                )}
+              </div>
+            </div>
           </div>
           <div className="modal-actions" style={{ marginTop: '18px' }}>
             <button className="btn secondary" onClick={onCancel}>No, keep it</button>
